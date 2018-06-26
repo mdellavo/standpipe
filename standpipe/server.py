@@ -8,12 +8,13 @@ from asyncio.queues import PriorityQueue, Queue, QueueFull
 import bson
 import aiofile
 
-from standpipe.config import HOST, PORT, MAX_QUEUE_SIZE, FLUSH_INTERVAL
+from standpipe.config import HOST, PORT, MAX_QUEUE_SIZE, FLUSH_INTERVAL, MONITOR_TIMEOUT
 
 
 log = logging.getLogger(__name__)
 
 
+# NB in priority order
 class MessageTypes(Enum):
     CHECKPOINT = 0
     RECORD = 1
@@ -81,21 +82,25 @@ def wal_checkpoint_header(record):
     return struct.pack("%c%12s", MessageTypes.CHECKPOINT, record.id.binary)
 
 
-async def wal_writer(path, loop, queue):
+async def wal_writer(path, loop, wal_log, stream_registry):
 
     async with aiofile.AIOFile(path, 'a+', loop=loop) as f:
         writer = aiofile.Writer(f)
         count = 0
         while True:
-            message_type, record = await queue.get()
+            message_type, record = await wal_log.get()
 
             if message_type == MessageTypes.RECORD:
                 await writer(wal_record_header(record))
                 await writer(record.record)
+
+                # now queue the message for upload
+                stream_registry.get_stream(record.stream_name).put(record)
+
             elif message_type == MessageTypes.CHECKPOINT:
                 await writer(wal_checkpoint_header(record))
 
-            queue.task_done()
+            wal_log.task_done()
 
             count += 1
 
@@ -103,13 +108,24 @@ async def wal_writer(path, loop, queue):
                 await f.fsync()
 
 
+async def event_schlepper(stream_registry):
+    while True:
+        asyncio.sleep(MONITOR_TIMEOUT)
+
+        for stream_name in stream_registry:
+            stream = stream_registry.get_stream(stream_name)
+            if not stream.empty():
+                pass
+
+
 def main():
     loop = asyncio.get_event_loop()
 
     wal_log = PriorityQueue(loop=loop)
-    asyncio.ensure_future(wal_writer("wal.log", loop, wal_log))
+    stream_registry = StreamRegistry(loop)
+    asyncio.ensure_future(wal_writer("wal.log", loop, wal_log, stream_registry))
 
-    # registry = StreamRegistry(loop)
+    asyncio.ensure_future(event_schlepper(stream_registry))
 
     s = Server(HOST, PORT, loop, wal_log)
     server = loop.run_until_complete(s.start())

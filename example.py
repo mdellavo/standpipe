@@ -17,4 +17,4 @@ def producer(n):
     c.close()
 
 
-producer(100)
+producer(1000)

@@ -1,3 +1,4 @@
+import os
 import zlib
 import struct
 import asyncio
@@ -57,8 +58,8 @@ class MessageTypes(Enum):
 
 
 class Record(object):
-    def __init__(self, stream_name, record):
-        self.id = bson.ObjectId()
+    def __init__(self, stream_name, record=None, record_id=None):
+        self.id = bson.ObjectId(record_id) or bson.ObjectId()
         self.stream_name = stream_name
         self.record = record
 
@@ -143,18 +144,94 @@ class Server(object):
                 log.warning("dropping message")
 
 
-def wal_record_header(record):
-    crc = zlib.crc32(bytes(record.record, "utf-8"))
-    return struct.pack("i12sLi", MessageTypes.RECORD.value, bytes(record.id.binary), crc, len(record.record))
+WAL_ENTRY_PREFIX = "i"
+WAL_ENTRY_PREFIX_SIZE = struct.calcsize(WAL_ENTRY_PREFIX)
+
+WAL_RECORD_IDENTIFIER = "64s12s"
+
+WAL_RECORD_HEADER = WAL_RECORD_IDENTIFIER + "Li"
+WAL_RECORD_HEADER_SIZE = struct.calcsize(WAL_RECORD_HEADER)
+WAL_ENTRY_RECORD_HEADER = WAL_ENTRY_PREFIX + WAL_RECORD_HEADER
+
+WAL_CHECKPOINT = WAL_RECORD_IDENTIFIER
+WAL_CHECKPOINT_SIZE = struct.calcsize(WAL_CHECKPOINT)
+WAL_ENTRY_CHECKPOINT = WAL_ENTRY_PREFIX + WAL_CHECKPOINT
 
 
-def wal_checkpoint_header(record):
-    return struct.pack("i64s12s", MessageTypes.CHECKPOINT.value, bytes(record.stream_name, "utf-8"), bytes(record.id.binary))
+def calc_crc(s):
+    return zlib.crc32(bytes(s, "utf-8"))
+
+
+def write_wal_record_header(record):
+    crc = calc_crc(record.record)
+    return struct.pack(WAL_ENTRY_RECORD_HEADER,
+                       MessageTypes.RECORD.value,
+                       bytes(record.stream_name, "utf-8"),
+                       bytes(record.id.binary),
+                       crc,
+                       len(record.record))
+
+
+def write_wal_checkpoint(record):
+    return struct.pack(WAL_ENTRY_CHECKPOINT,
+                       MessageTypes.CHECKPOINT.value,
+                       bytes(record.stream_name, "utf-8"),
+                       bytes(record.id.binary))
+
+
+def read_wal_record(f):
+    buf = f.read(WAL_RECORD_HEADER_SIZE)
+    stream_name, _id, crc, length = struct.unpack(WAL_RECORD_HEADER, buf)
+    record = f.read(length)
+    record_crc = calc_crc(record)
+
+    if record_crc != crc:
+        print("crc mismatch {} != {}".format(record_crc, crc))
+
+    return Record(stream_name, record=record, record_id=_id)
+
+
+def read_wal_checkpoint(f):
+    buf = f.read(WAL_CHECKPOINT_SIZE)
+    if not buf:
+        return
+    stream_name, _id = struct.unpack(WAL_CHECKPOINT, buf)
+    return Record(stream_name, record_id=_id)
+
+
+def read_wal_entry(f):
+    buf = f.read(WAL_ENTRY_PREFIX_SIZE)
+    if not buf:
+        return None, None
+    record_type, = struct.unpack(WAL_ENTRY_PREFIX, buf)
+    if record_type == MessageTypes.RECORD.value:
+        record = read_wal_record(f)
+        return MessageTypes.RECORD, record
+    elif record_type == MessageTypes.CHECKPOINT.value:
+        record = read_wal_checkpoint(f)
+        return MessageTypes.CHECKPOINT, record
+    else:
+        raise ValueError("unsupported record type [{}]".format(buf))
+
+
+def scan_wal(f):
+    while True:
+        record_type, record = read_wal_entry(f)
+        if not record:
+            break
+
+        yield record_type, record
+
+
+def replay_log(path):
+    with open(path) as f:
+        for record_type, record in scan_wal(f):
+            print(record_type, record)
 
 
 async def wal_writer(path, loop, wal_log, stream_registry):
 
-    async with aiofile.AIOFile(path, 'r+b', loop=loop) as f:
+    async with aiofile.AIOFile(path, 'w+b', loop=loop) as f:
         writer = aiofile.Writer(f)
         count = 0
         while True:
@@ -165,7 +242,7 @@ async def wal_writer(path, loop, wal_log, stream_registry):
                 break
 
             if message_type == MessageTypes.RECORD.value:
-                await writer(wal_record_header(record))
+                await writer(write_wal_record_header(record))
                 await writer(bytes(record.record, "utf8"))
 
                 # now queue the message for upload
@@ -173,13 +250,13 @@ async def wal_writer(path, loop, wal_log, stream_registry):
 
             elif message_type == MessageTypes.CHECKPOINT.value:
                 log.info("checkpoint %s:%s", record.stream_name, record.id)
-                await writer(wal_checkpoint_header(record))
+                await writer(write_wal_checkpoint(record))
 
             wal_log.task_done()
 
             count += 1
 
-            if count % config.FLUSH_INTERVAL:
+            if False and count % config.FLUSH_INTERVAL:
                 await f.fsync()
 
     log.info("wal writer shutdown")
@@ -254,7 +331,11 @@ def main():
 
     server = Server(config.HOST, config.PORT, loop, wal_log)
 
-    wal_coro = wal_writer("wal.log", loop, wal_log, stream_registry)
+    wal_path = "wal.log"
+    if os.path.exists(wal_path):
+        replay_log(wal_path)
+
+    wal_coro = wal_writer(wal_path, loop, wal_log, stream_registry)
     asyncio.ensure_future(wal_coro)
 
     event_schlepper_coro = event_schlepper(loop, stream_registry, wal_log)

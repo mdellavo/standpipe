@@ -3,5 +3,5 @@ import logging
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
 
-    from standpipe import server
+    from . import server
     server.main()

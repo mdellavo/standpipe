@@ -3,9 +3,9 @@ import threading
 import logging
 from queue import Queue
 
-from standpipe import config
-
 log = logging.getLogger(__name__)
+
+CLIENT_QUEUE_SIZE = 5000
 
 
 def drain(queue, sock):
@@ -30,10 +30,10 @@ def worker(host, port, queue):
 
 
 class StreamClient(object):
-    def __init__(self, host, port):
+    def __init__(self, host, port, queue_size=CLIENT_QUEUE_SIZE):
         self.host = host
         self.port = port
-        self.queue = Queue(maxsize=config.CLIENT_QUEUE_SIZE)
+        self.queue = Queue(maxsize=queue_size)
         self.thread = threading.Thread(target=worker, args=(self.host, self.port, self.queue))
         self.thread.setDaemon(True)
         self.thread.start()

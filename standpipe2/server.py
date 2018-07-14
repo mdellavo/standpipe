@@ -1,3 +1,5 @@
+import sys
+import time
 import socket
 import select
 import logging
@@ -50,6 +52,11 @@ class Server(object):
         self.clients = {}
 
         self.terminator = terminator
+
+    def stop(self):
+        if self.running:
+            self.running = False
+            self.stop_server()
 
     def create_server(self):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -156,14 +163,6 @@ def router(queue, streams):
     log.info("router shutdown")
 
 
-def schlepper():
-    pass
-
-
-def server(address, port, router_queue):
-    server = Server(address, port, router_queue)
-    server.run()
-
 
 def main():
     logging.basicConfig(level=logging.DEBUG)
@@ -174,14 +173,23 @@ def main():
     router_queue = Queue()
     streams = {}
 
-    router_thread = Thread(target=router, args=(router_queue, streams))
-    schlepper_thread = Thread(target=schlepper)
-    server_thread = Thread(target=server, args=(address, port, router_queue))
+    server = Server(address, port, router_queue)
 
-    threads = [router_thread, schlepper_thread, server_thread]
+    router_thread = Thread(target=router, args=(router_queue, streams))
+    server_thread = Thread(target=server.run)
+
+    threads = [router_thread, server_thread]
 
     for thread in threads:
         thread.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log.info("shutting down...")
+        server.stop()
+        router_queue.put(None)
 
     for thread in threads:
         thread.join()

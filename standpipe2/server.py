@@ -1,20 +1,27 @@
-import sys
 import time
 import socket
 import select
 import logging
 from threading import Thread
-from Queue import Queue
+from Queue import Queue, Empty
 
 from standpipe.model import Record
+from standpipe.util import grouper
+
+import boto3
 
 BACKLOG = 10
 TIMEOUT = 1
 RECV_SIZE = 2**16
+MAX_CHUNK_SIZE = 500
+CHECK_INTERVAL = 5
+NUM_WORKERS = 4
+DROP_MESSAGES = True
+NUM_RETRIES = 5
 
 log = logging.getLogger(__name__)
 
-
+TERMINATOR = object()
 READABLE = select.POLLIN | select.POLLPRI | select.POLLHUP | select.POLLERR
 
 
@@ -147,21 +154,108 @@ class Server(object):
                     self.on_error(sock)
 
 
-def router(queue, streams):
+class Stream(object):
+    def __init__(self, name, deadline=5):
+        self.name = name
+        self.deadline = deadline
+        self.last = time.time()
+        self.items = []
+        self.count = 0
+        self.total_bytes = 0
+
+    def add(self, item):
+        self.items.append(item)
+        self.count += 1
+        self.total_bytes += len(item.record)
+
+    def flush(self):
+        rv = self.items
+        self.items = []
+        self.last = time.time()
+        return rv
+
+    @property
+    def is_flushable(self):
+        return (
+            (self.items and (time.time() > (self.last + self.deadline))) or
+            (len(self.items) >= MAX_CHUNK_SIZE)
+        )
+
+
+def router(input_queue, upload_queue):
+
+    streams = {}
+    last = time.time()
+
     while True:
-        record = queue.get()
-        if record is None:
+        try:
+            record = input_queue.get(timeout=1)
+        except Empty:
+            record = None
+
+        if record is TERMINATOR:
             break
 
-        stream_queue = streams.get(record.stream_name)
-        if not stream_queue:
-            stream_queue = Queue()
-            streams[record.stream_name] = stream_queue
+        if record:
+            # slot items
+            stream = streams.get(record.stream_name)
+            if not stream:
+                stream = Stream(record.stream_name)
+                streams[stream.name] = stream
 
-        stream_queue.put(record)
-        print(record)
+            stream.add(record)
+        else:
+            stream = None
+
+        if time.time() > (last + CHECK_INTERVAL) or (stream and stream.is_flushable):
+            last = time.time()
+
+            for stream in streams.values():
+                if stream.is_flushable:
+                    items = stream.flush()
+                    for chunk in grouper(MAX_CHUNK_SIZE, items):
+                        upload_queue.put(chunk)
+
     log.info("router shutdown")
 
+
+def try_batch(batch):
+    log.debug("putting %d records for stream %s", len(batch), batch[0].stream_name)
+
+    if DROP_MESSAGES:
+        time.sleep(.25)
+        return
+
+    client = boto3.client("firehose")
+
+    for i in range(NUM_RETRIES):
+        try:
+            rv = client.put_records_batch(
+                DeliveryStreamName=batch[0].stream_name,
+                Records=[{"Data": record.record} for record in batch]
+            )
+            fail_count = rv["FailedPutCount"]
+            if fail_count == 0:
+                return
+            elif fail_count > 0:
+                errors = rv["RequestResponses"]
+                batch = [record for record, error in zip(batch, errors) if error["ErrorCode"]]
+        except client.exceptions.ClientError:
+            log.exception("error putting batch")
+            continue
+        time.sleep(2**i)
+
+
+def schlepper(upload_queue):
+    while True:
+        batch = upload_queue.get()
+        if batch is TERMINATOR:
+            break
+        # noinspection PyBroadException
+        try:
+            try_batch(batch)
+        except Exception:
+            log.exception("error putting bactch")
 
 
 def main():
@@ -171,14 +265,17 @@ def main():
     port = 15555
 
     router_queue = Queue()
-    streams = {}
-
+    upload_queue = Queue()
     server = Server(address, port, router_queue)
 
-    router_thread = Thread(target=router, args=(router_queue, streams))
+    router_thread = Thread(target=router, args=(router_queue, upload_queue))
     server_thread = Thread(target=server.run)
 
     threads = [router_thread, server_thread]
+
+    for _ in range(NUM_WORKERS):
+        worker_thread = Thread(target=schlepper, args=(upload_queue,))
+        threads.append(worker_thread)
 
     for thread in threads:
         thread.start()
@@ -189,7 +286,9 @@ def main():
     except KeyboardInterrupt:
         log.info("shutting down...")
         server.stop()
-        router_queue.put(None)
+        router_queue.put(TERMINATOR)
+        for _ in range(NUM_WORKERS):
+            upload_queue.put(TERMINATOR)
 
     for thread in threads:
         thread.join()

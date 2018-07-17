@@ -160,13 +160,9 @@ class Stream(object):
         self.deadline = deadline
         self.last = time.time()
         self.items = []
-        self.count = 0
-        self.total_bytes = 0
 
     def add(self, item):
         self.items.append(item)
-        self.count += 1
-        self.total_bytes += len(item.record)
 
     def flush(self):
         rv = self.items
@@ -187,6 +183,8 @@ def router(input_queue, upload_queue):
     streams = {}
     last = time.time()
 
+    total_records = total_bytes = 0
+
     while True:
         try:
             record = input_queue.get(timeout=1)
@@ -196,6 +194,8 @@ def router(input_queue, upload_queue):
         if record is TERMINATOR:
             break
 
+        flushable_streams = []
+
         if record:
             # slot items
             stream = streams.get(record.stream_name)
@@ -204,24 +204,43 @@ def router(input_queue, upload_queue):
                 streams[stream.name] = stream
 
             stream.add(record)
-        else:
-            stream = None
+            if stream.is_flushable:
+                flushable_streams.append(stream)
 
-        if time.time() > (last + CHECK_INTERVAL) or (stream and stream.is_flushable):
-            last = time.time()
+        window_expired = time.time() > (last + CHECK_INTERVAL)
 
-            for stream in streams.values():
-                if stream.is_flushable:
-                    items = stream.flush()
-                    for chunk in grouper(MAX_CHUNK_SIZE, items):
-                        upload_queue.put(chunk)
+        if window_expired:
+            flushable_streams.extend([stream for stream in streams.values() if stream.is_flushable])
 
-    log.info("router shutdown")
+        if flushable_streams:
+            for stream in flushable_streams:
+                items = stream.flush()
+
+                num_records = len(items)
+                batch_bytes = sum(len(record.record) for record in items)
+                log.info("flushing %d records (%.2fKB) for stream %s", num_records, batch_bytes/1024., stream.name)
+
+                total_bytes += batch_bytes
+                total_records += num_records
+
+                for chunk in grouper(MAX_CHUNK_SIZE, items):
+                    upload_queue.put(chunk)
+
+        if window_expired:
+            now = time.time()
+            delta = now - last
+
+            if total_records:
+                log.info("flushed %d records (%.2fKB) in %.2fs (%.2frps)",
+                         total_records, total_bytes/1024., delta, total_records / delta)
+
+            last = now
+            total_records = total_bytes = 0
+
+log.info("router shutdown")
 
 
 def try_batch(batch):
-    log.debug("putting %d records for stream %s", len(batch), batch[0].stream_name)
-
     if DROP_MESSAGES:
         time.sleep(.25)
         return

@@ -6,7 +6,7 @@ from standpipe import client, config
 RECORD_SEPARATOR = "\n"
 
 NUM_WORKERS = 5
-NUM_RECORDS = 1000000
+NUM_RECORDS = 100000
 
 
 def serialize(record):
@@ -18,7 +18,7 @@ def producer(i, n):
 
     count = 0
     while count < n:
-        c.write("test-{}".format(i), serialize({"n": n}))
+        c.write("test-{}".format(i), serialize({"n": count}))
         count += 1
     c.close()
 

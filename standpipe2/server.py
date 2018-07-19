@@ -237,7 +237,7 @@ def router(input_queue, upload_queue):
             last = now
             total_records = total_bytes = 0
 
-log.info("router shutdown")
+    log.info("router shutdown")
 
 
 def try_batch(batch):

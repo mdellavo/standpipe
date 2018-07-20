@@ -28,6 +28,8 @@ The client and server will buffer events in memory but will drop events if overl
 - [ ] python3 asycio server
 - [ ] http support for ingestion
 - [ ] expose some stats
+- [ ] throttling
+- [ ] message durability (WAL)
 
 ## Author
 

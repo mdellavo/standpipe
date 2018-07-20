@@ -4,6 +4,25 @@ An aggregator and relay for AWS Kinesis Firehose streams.
 
 Something you hook firehoses up to
 
+## Design
+
+Standpipe is a simple TCP client/server.  The standpipe client
+will accept events written to it, encode and forward them to the server.
+The standpipe server will aggregate events per stream and periodically forward to Kinesis Firehose.
+
+The standpipe server is a simple threaded/evented server consiting of a network thread, a router thread and a number of upload worker threads.
+The network thread is responsible for servicing the client sockets using poll(), decoding the messages and placing them on a queue for the router thread.
+The router thread reads messages off the queue, slots them according to their stream and peridocially flushes the streams in batches to the worker threads.
+The worker threads simply take batches of events from the queue and upload them to Kinesis Firehose.
+
+The client server protocol is simply:
+
+STREAM_NAME + " " + PAYLOAD + TERMINATOR
+
+Events are not currently durable!
+The client and server will buffer events in memory but will drop events if overloaded, does not currently provide back pressure.
+
+
 ## Author
 
 Marc DellaVolpe  (marc.dellavolpe@gmail.com)

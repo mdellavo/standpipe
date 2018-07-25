@@ -1,3 +1,5 @@
+import os
+import abc
 import time
 import socket
 import select
@@ -38,45 +40,89 @@ def is_error(flag):
 
 
 class Client(object):
-    def __init__(self, socket, address):
-        self.socket = socket
+    def __init__(self, sock, address):
+        self.socket = sock
         self.address = address
         self.buffer = ""
 
 
-class Server(object):
-    def __init__(self, address, port, router_queue, terminator="\n", backlog=BACKLOG):
-        self.address = (address, port)
+class Listener(object):
+    __metaclass__ = abc.ABCMeta
+
+    def __init__(self, family, address, backlog=BACKLOG):
+        self.family = family
+        self.address = address
         self.backlog = backlog
+        self.socket = None
 
+    def fileno(self):
+        return self.socket.fileno() if self.socket else None
+
+    def start(self):
+        if self.socket is None:
+            self.socket = socket.socket(self.family, socket.SOCK_STREAM)
+            self.socket.setblocking(0)
+            self.socket.bind(self.address)
+            self.socket.listen(self.backlog)
+
+    def stop(self):
+        if self.socket is not None:
+            self.socket.close()
+            self.socket = None
+
+    def accept(self):
+        return self.socket.accept()
+
+
+class TCPListener(Listener):
+    def __init__(self, address, port, **kwargs):
+        super(TCPListener, self).__init__(socket.AF_INET, (address, port), **kwargs)
+
+    def start(self):
+        super(TCPListener, self).start()
+        log.info("started tcp listener on %s", self.address)
+
+
+class UnixListener(Listener):
+    def __init__(self, address, **kwargs):
+        super(UnixListener, self).__init__(socket.AF_UNIX, address, **kwargs)
+
+    def start(self):
+        self.cleanup()
+        super(UnixListener, self).start()
+        log.info("started unix listener on %s", self.address)
+
+    def stop(self):
+        super(UnixListener, self).stop()
+        self.cleanup()
+
+    def cleanup(self):
+        try:
+            os.unlink(self.address)
+        except OSError:
+            if os.path.exists(self.address):
+                raise
+
+
+class Server(object):
+    def __init__(self, router_queue, terminator="\n"):
+        self.listeners = {}
         self.router_queue = router_queue
-
         self.running = False
-        self.server = None
-
         self.poll = select.poll()
         self.sockets = {}
         self.clients = {}
-
         self.terminator = terminator
 
     def stop(self):
         if self.running:
             self.running = False
-            self.stop_server()
+        for listener in self.listeners.values():
+            listener.stop()
 
-    def create_server(self):
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setblocking(0)
-        self.server.bind(self.address)
-        self.server.listen(self.backlog)
-        self.poll.register(self.server, READABLE)
-        self.sockets[self.server.fileno()] = self.server
-        log.info("server started on %s", self.address)
-
-    def stop_server(self):
-        self.server.close()
-        log.info("server stopped on %s", self.address)
+    def attach_listener(self, listener):
+        self.listeners[listener.socket] = listener
+        self.register_socket(listener.socket)
 
     def drop_client(self, client_socket):
         self.unregister_socket(client_socket)
@@ -104,8 +150,8 @@ class Server(object):
         events = self.poll.poll(TIMEOUT)
         return [(self.sockets[fd], flags) for fd, flags in events]
 
-    def on_client_connect(self):
-        client_sock, client_address = self.server.accept()
+    def on_client_connect(self, listener):
+        client_sock, client_address = listener.accept()
         client_sock.setblocking(0)
         self.register_socket(client_sock)
         client = self.add_client(client_sock, client_address)
@@ -139,13 +185,13 @@ class Server(object):
         self.drop_client(client_socket)
 
     def run(self):
-        self.create_server()
         self.running = True
         while self.running:
             for sock, flag in self.wait_for_events():
                 if is_readable(flag):
-                    if sock is self.server:
-                        self.on_client_connect()
+                    if sock in self.listeners:
+                        listener = self.listeners[sock]
+                        self.on_client_connect(listener)
                     else:
                         self.on_client_readable(sock)
                 elif is_hangup(flag):
@@ -280,12 +326,19 @@ def schlepper(upload_queue):
 def main():
     logging.basicConfig(level=logging.DEBUG)
 
-    address = "0.0.0.0"
-    port = 15555
+    ip_address, port = "0.0.0.0", 15555
+    unix_address = "./socket"
 
     router_queue = Queue()
     upload_queue = Queue()
-    server = Server(address, port, router_queue)
+    server = Server(router_queue)
+
+    tcp_listener = TCPListener(ip_address, port)
+    unix_listener = UnixListener(unix_address)
+
+    for listener in [tcp_listener, unix_listener]:
+        listener.start()
+        server.attach_listener(listener)
 
     router_thread = Thread(target=router, args=(router_queue, upload_queue))
     server_thread = Thread(target=server.run)

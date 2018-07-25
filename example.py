@@ -1,9 +1,9 @@
 import logging
 import threading
 
-from standpipe import client, config
+from standpipe import client
 
-
+ADDRESS = "unix://./socket"
 NUM_WORKERS = 5
 NUM_RECORDS = 100000
 
@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 
 def producer(i, n):
-    c = client.StreamClient(config.HOST, config.PORT)
+    c = client.StreamClient(ADDRESS)
 
     count = 0
     while count < n:

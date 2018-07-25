@@ -2,6 +2,7 @@ import abc
 import json
 import time
 import socket
+import urlparse
 import threading
 import logging
 from Queue import Queue
@@ -24,13 +25,29 @@ def drain(queue, sock):
         queue.task_done()
 
 
-def worker(host, port, queue):
+def connect_to(url):
+    parsed_url = urlparse.urlparse(url)
+
+    if parsed_url.scheme == "tcp":
+        host, port = parsed_url.netloc.split(":")
+        return socket.create_connection((host, port))
+    elif parsed_url.scheme == "unix":
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        path = url[len("unix://"):]
+        sock.connect(path)
+        return sock
+
+    raise ValueError("could not connect to: " + url)
+
+
+def worker(url, queue):
+
     while True:
         for attempt in range(5):
             log.info("connecting...")
             # noinspection PyBroadException
             try:
-                with closing(socket.create_connection((host, port))) as sock:
+                with closing(connect_to(url)) as sock:
                     return drain(queue, sock)
             except Exception:
                 log.exception("worker died, restarting")
@@ -52,13 +69,12 @@ class JsonEncoder(Encoder):
 
 
 class StreamClient(object):
-    def __init__(self, host, port, encoder=None, terminator=None, queue_size=CLIENT_QUEUE_SIZE):
-        self.host = host
-        self.port = port
+    def __init__(self, url, encoder=None, terminator=None, queue_size=CLIENT_QUEUE_SIZE):
+        self.url = url
         self.queue = Queue(maxsize=queue_size)
         self.encoder = encoder or JsonEncoder()
         self.terminator = terminator or u"\n"
-        self.thread = threading.Thread(target=worker, args=(self.host, self.port, self.queue))
+        self.thread = threading.Thread(target=worker, args=(self.url, self.queue))
         self.thread.setDaemon(True)
         self.thread.start()
 

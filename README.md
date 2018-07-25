@@ -4,9 +4,14 @@ An aggregator and relay for AWS Kinesis Firehose streams.
 
 Something you hook firehoses up to
 
+## Why do I need this?
+
+- Aggregate events across a host or cluster to minimize upstream API calls
+- simple async fire-and-forget API for clients, no need to deal with handling retries
+
 ## Design
 
-Standpipe is a simple TCP client/server.  The standpipe client
+Standpipe is a simple client/server accessed over TCP or Unix domain socket.  The standpipe client
 will accept events written to it, encode and forward them to the server.
 The standpipe server will aggregate events per stream and periodically forward to Kinesis Firehose.
 
@@ -22,13 +27,15 @@ STREAM_NAME + " " + PAYLOAD + TERMINATOR
 Events are not currently durable!
 The client and server will buffer events in memory but will drop events if overloaded, does not currently provide back pressure.
 
+Clients will attempt to reconnect with backoff if the server becomes unavailable while buffering messages in memory.
+
 ## ToDo
 - [ ] Add gzip to client/server
 - [ ] Add preconfigured encoders for other formats
 - [ ] python3 asycio server
 - [ ] http support for ingestion
 - [ ] expose some stats
-- [ ] throttling
+- [ ] throttling / back pressure
 - [ ] message durability (WAL)
 
 ## Author

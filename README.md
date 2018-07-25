@@ -22,6 +22,14 @@ STREAM_NAME + " " + PAYLOAD + TERMINATOR
 Events are not currently durable!
 The client and server will buffer events in memory but will drop events if overloaded, does not currently provide back pressure.
 
+## ToDo
+- [ ] Add gzip to client/server
+- [ ] Add preconfigured encoders for other formats
+- [ ] python3 asycio server
+- [ ] http support for ingestion
+- [ ] expose some stats
+- [ ] throttling
+- [ ] message durability (WAL)
 
 ## Author
 

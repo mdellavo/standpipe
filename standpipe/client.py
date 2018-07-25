@@ -38,7 +38,6 @@ def worker(host, port, queue):
             time.sleep(2**attempt)
 
 
-
 class Encoder(object):
     __metaclass__ = abc.ABCMeta
 

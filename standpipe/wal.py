@@ -82,9 +82,9 @@ def replay_log(path):
 
 
 # FIXME thread pool executor
-async def wal_writer(path, loop, wal_log, stream_registry):
+async def wal_writer(path, wal_log):
 
-    async with aiofile.AIOFile(path, 'w+b', loop=loop) as f:
+    async with aiofile.AIOFile(path, 'w+b') as f:
         writer = aiofile.Writer(f)
         count = 0
         while True:
@@ -98,8 +98,7 @@ async def wal_writer(path, loop, wal_log, stream_registry):
                 await writer(write_wal_record_header(record))
                 await writer(bytes(record.record, "utf8"))
 
-                # now queue the message for upload
-                await stream_registry.get_stream(record.stream_name).put(record)
+                # FIXME
 
             elif message_type == MessageTypes.CHECKPOINT.value:
                 log.info("checkpoint %s:%s", record.stream_name, record.id)

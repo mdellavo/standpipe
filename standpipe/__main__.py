@@ -1,7 +1,8 @@
 import logging
+import asyncio
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
 
     from . import server
-    server.main()
+    asyncio.run(server.main())
